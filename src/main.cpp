@@ -48,7 +48,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 Noiasca_ht16k33_hw_14 ht16k33 = Noiasca_ht16k33_hw_14();
 const uint8_t i2cAddress = 0x70;                                     // the I2C address of the first module
 const uint8_t numOfDevices = 1;                                      // how many modules have you installed on the I2C Bus
-const uint16_t wait = 500;   // wait milliseconds between demos
+const uint16_t wait 400;   // wait milliseconds between demos
 
 const char* ssid = "giordano"; // Your desired Access Point name
 const char* password = "12345678"; // Password for the Access Point
