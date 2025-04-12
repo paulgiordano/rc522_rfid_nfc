@@ -1,9 +1,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <WiFi.h>
-#include <ESPmDNS.h>
-#include <WiFiUdp.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <ArduinoOTA.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_LEDBackpack.h>
@@ -34,9 +33,6 @@ bool card_read = false;
 
 bool locked = false;
 
-bool open_door = false;
-bool close_door = false;
-
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 #define OLED_RESET     4 // Reset pin # (or -1 if sharing Arduino reset pin)
@@ -48,74 +44,46 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 Noiasca_ht16k33_hw_14 ht16k33 = Noiasca_ht16k33_hw_14();
 const uint8_t i2cAddress = 0x70;                                     // the I2C address of the first module
 const uint8_t numOfDevices = 1;                                      // how many modules have you installed on the I2C Bus
-const uint16_t wait 400;   // wait milliseconds between demos
+const uint16_t wait = 400;   // wait milliseconds between demos
 
-const char* ssid = "giordano"; // Your desired Access Point name
-const char* password = "12345678"; // Password for the Access Point
 const int port = 80; // Web server port
-
-WebServer server(port);
-const char* ap_ssid = "ESP32-Setup";  // AP mode SSID
-const char* ap_password = "12345678";  // AP mode password
-
-// HTML form
-const char* html_form = R"(
-<!DOCTYPE html>
-<html>
-<head>
-    <title>WiFi Setup</title>
-    <style>
-        body { font-family: Arial; margin: 20px; }
-        .form-group { margin-bottom: 15px; }
-        input { padding: 5px; width: 200px; }
-        button { padding: 5px 15px; }
-    </style>
-</head>
-<body>
-    <h2>WiFi Configuration</h2>
-    <form action="/save" method="POST">
-        <div class="form-group">
-            <label>SSID:</label><br>
-            <input type="text" name="ssid" required>
-        </div>
-        <div class="form-group">
-            <label>Password:</label><br>
-            <input type="password" name="password" required>
-        </div>
-        <button type="submit">Connect</button>
-    </form>
-</body>
-</html>
-)";
-
-void handleSave();
-void handleRoot();
+const char *apSSID = "ESP32-AP"; // AP SSID
+const char *apPassword = "password"; // AP Password
+WebServer server(port); // Web server instance
+DNSServer dnsServer; // DNS server instance
+String newSSID = "";
+String newPassword = "";
+void handleConfigSubmit();
+void startAP();
+void connectToWiFi();
+void handleConfig();
+void handleConfigSubmit();
 
 void doorOpen() {
   ht16k33.clear();
   ht16k33.print(F("OPEN"));
-  Serial.println("Door Open");
   if (prefs.getBool("locked")) 
   {
     Serial.println("Unlocking Door");
     digitalWrite(RELAY_PIN, LOW);
     delay(100); 
     digitalWrite(RELAY_PIN, HIGH);
+    prefs.putBool("locked", false);
+    Serial.println("Door Open");
   }
-  prefs.putBool("locked", false);
 }
+
 void doorClose() {
   ht16k33.clear();
   ht16k33.print(F("LOCK"));
-  Serial.println("Door Locked");
-  if (!prefs.getBool("locked")) 
-  {
+  if (!prefs.getBool("locked")){
     Serial.println("Locking Door");
     digitalWrite(RELAY_PIN, LOW);
-    delay(100);
+    delay(100); 
     digitalWrite(RELAY_PIN, HIGH);
+    prefs.putBool("locked", true);
+    Serial.println("Door Locked");
   }
-  prefs.putBool("locked", true);
 }
 
 // When any of the pins have changed, update the state of the wiegand library
@@ -133,13 +101,9 @@ void doorToggle() {
   Serial.println("doorToggle");
   int c = digitalRead(BUTTON_PIN);
   if (prefs.getBool("locked")) {
-    triggered = true;
-    close_door = false;
-    open_door = true;
+    doorOpen();
   } else {
-    triggered = true;
-    close_door = true;
-    open_door = false;
+    doorClose();
   }
 }
 // Notifies when a reader has been connected or disconnected.
@@ -186,87 +150,88 @@ void receivedDataError(Wiegand::DataError error, uint8_t* rawData, uint8_t rawBi
     Serial.println();
 }
 
-void handleRoot() {
-  server.send(200, "text/html", html_form);
+// Function to handle the configuration page
+void handleConfig() {
+  String html = R"(
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>WiFi Configuration</title>
+    </head>
+    <body>
+      <h1>WiFi Configuration</h1>
+      <form action="/config" method="POST">
+        <label for="ssid">SSID:</label><br>
+        <input type="text" id="ssid" name="ssid"><br><br>
+        <label for="password">Password:</label><br>
+        <input type="password" id="password" name="password"><br><br>
+        <input type="submit" value="Submit">
+      </form>
+    </body>
+    </html>
+  )";
+  server.send(200, "text/html", html);
 }
 
-void startAPMode() {
-  // Start AP mode
-  WiFi.softAP(ap_ssid, ap_password);
-  
-  Serial.println("AP Mode Started");
-  Serial.print("IP Address: ");
+// Function to start the Access Point
+void startAP() {
+  WiFi.mode(WIFI_MODE_NULL);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(apSSID, apPassword);
+  Serial.println("Access Point started");
+  Serial.print("AP IP address: ");
   Serial.println(WiFi.softAPIP());
 
-  // Setup web server routes
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/save", HTTP_POST, handleSave);
-  
+  // Setup DNS Server for Captive Portal
+  dnsServer.start(53, "*", WiFi.softAPIP());
+
+  // Setup Web Server routes
+  server.on("/", handleConfig);
+  server.on("/config", HTTP_POST, handleConfigSubmit);
   server.begin();
-  Serial.println("HTTP server started");
 }
 
-void handleSave() {
-  String new_ssid = server.arg("ssid");
-  String new_password = server.arg("password");
-
-  // Save to preferences
-  prefs.putString("ssid", new_ssid);
-  prefs.putString("password", new_password);
-  // Send response
-  server.send(200, "text/html", "Saved. ESP32 will now connect to the new network...<br>Please connect your device to the same network.");
-
-  // Wait a bit before trying to connect
-  delay(1000);
-
-  // Connect to the new network
-  WiFi.softAPdisconnect(true);
-  WiFi.begin(new_ssid.c_str(), new_password.c_str());
-
+// Function to connect to the WiFi network
+void connectToWiFi() {
+  WiFi.begin(newSSID.c_str(), newPassword.c_str());
+  Serial.println("newssid=" + newSSID);
+  Serial.println("newpassword=" + newPassword);
+  Serial.print("Connecting to WiFi");
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+  while (WiFi.status() != WL_CONNECTED && attempts < 10) {
     delay(500);
     Serial.print(".");
     attempts++;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nConnected to new WiFi");
-    Serial.println("IP: " + WiFi.localIP().toString());
+    Serial.println("");
+    Serial.println("WiFi connected");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+    prefs.putString("ssid", newSSID);
+    prefs.putString("password", newPassword);
   } else {
-    Serial.println("\nFailed to connect. Restarting AP mode...");
-    startAPMode();
+    Serial.println("");
+    Serial.println("WiFi connection failed. Restarting AP mode.");
+    startAP();
   }
 }
 
-void getWifiConnection() {
-  // Initialize preferences
-  prefs.begin("wifi-config", false);
-
-  // Check if we have saved credentials
-  String saved_ssid = prefs.getString("ssid", "");
-  String saved_password = prefs.getString("password", "");
-
-  if (saved_ssid.length() > 0) {
-    // Try to connect with saved credentials
-    WiFi.begin(saved_ssid.c_str(), saved_password.c_str());
-    
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-      delay(500);
-      Serial.print(".");
-      attempts++;
-    }
-    
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nConnected to WiFi");
-      Serial.println("IP: " + WiFi.localIP().toString());
-      return;
-    }
+void handleConfigSubmit() {
+  if (server.hasArg("ssid") && server.hasArg("password")) {
+    newSSID = server.arg("ssid");
+    newPassword = server.arg("password");
+    server.send(200, "text/plain", "WiFi credentials received. ESP will attempt to connect...");
+ // Function to handle the form submission
+    delay(1000);
+    WiFi.softAPdisconnect(true); // Disable the AP
+    WiFi.mode(WIFI_MODE_NULL);
+    WiFi.mode(WIFI_STA); // Switch to STA mode
+    connectToWiFi();
+  } else {
+    server.send(400, "text/plain", "Missing SSID or password");
   }
-
-  // If no saved credentials or connection failed, start AP mode
-  startAPMode();
 }
 
 void setup(void) 
@@ -274,30 +239,38 @@ void setup(void)
   Serial.begin(9600);
   delay(5000);
   Serial.println("Hello!");
-  prefs.begin("backdoor", false);
+
+  prefs.getString("ssid", newSSID);
+  prefs.getString("password", newPassword);
+  connectToWiFi();
+  while (newSSID == "")
+  {
+    dnsServer.processNextRequest();
+    server.handleClient();
+  }
+  
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH);
   pinMode(SDA, OUTPUT);
   pinMode(SCL, OUTPUT);
   Wire.begin(SDA, SCL);
-  Serial.println("ht16k33 begin");
-  ht16k33.begin(i2cAddress, numOfDevices);
-  ht16k33.clear();
 
+  Serial.println("Display begin");
   if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS))
   {
     Serial.println(F("SSD1306 allocation failed"));
     while(1); // Don't proceed, loop forever
   }
-  Serial.println("Display begin");
   display.clearDisplay();
   display.setCursor(0, 0); //oled display
   display.setTextSize(1);
   display.setTextColor(WHITE);
 
-  getWifiConnection();
-  server.handleClient();
-  Serial.println(WiFi.localIP());
+  Serial.println("ht16k33 begin");
+  ht16k33.begin(i2cAddress, numOfDevices);
+  ht16k33.clear();
+  prefs.putBool("locked", true);
+  doorOpen();
 
   ArduinoOTA
     .onStart([]() {
@@ -340,7 +313,6 @@ void setup(void)
   pinMode(PIN_D0, INPUT);
   pinMode(PIN_D1, INPUT);
   pinMode(PIN_OPEN, INPUT_PULLUP);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(PIN_OPEN), keypad_triggered, RISING);
   attachInterrupt(digitalPinToInterrupt(PIN_D0), pinStateChanged, CHANGE);
   attachInterrupt(digitalPinToInterrupt(PIN_D1), pinStateChanged, CHANGE);
@@ -352,17 +324,6 @@ void setup(void)
   display.setTextColor(WHITE);
   display.print("Waiting for input");
   display.setCursor(0, 55);
-  locked = prefs.getBool("locked", false); 
-  if (locked)
-  {
-    Serial.println("Door is locked");
-    doorClose(); 
-  }
-  else
-  {
-    Serial.println("Door is unlocked");
-    doorOpen(); 
-  }
 
   display.display();
 }
@@ -373,17 +334,6 @@ void loop(void)
   wiegand.flush();
   interrupts();
 
-  if (open_door)
-  {
-    doorOpen();
-    open_door = false;
-  }
-  if (close_door)
-  {
-    doorClose();
-    close_door = false;
-  }
-    
   ArduinoOTA.handle();
  
   if (card_read) 
